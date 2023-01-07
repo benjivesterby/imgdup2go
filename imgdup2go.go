@@ -130,6 +130,9 @@ func main() {
 	}
 
 	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+
+	total := 0
 
 	for {
 		select {
@@ -139,8 +142,9 @@ func main() {
 			if !ok {
 				return
 			}
+			total++
 		case <-tick.C:
-			log.Printf("total duplicates: %d", matcher.count)
+			log.Printf("processed: %d | total duplicates: %d", total, matcher.count)
 		}
 	}
 }
@@ -253,17 +257,17 @@ func (m *Matcher) Match(ctx context.Context, path string) (struct{}, bool) {
 	}
 
 	if decodeFunc, ok := extensions[format]; ok {
-		fmt.Printf("decoding %s\n", path)
+		//fmt.Printf("decoding %s\n", path)
 		file, err := os.Open(path)
 		if err != nil {
-			fmt.Printf("%s\n", errors.WithMessagef(err, "%s", path))
+			//fmt.Printf("%s\n", errors.WithMessagef(err, "%s", path))
 			return struct{}{}, false
 		}
 		defer checkClose(file, &err)
 
 		img, err := decodeFunc(file)
 		if err != nil {
-			fmt.Printf("%s\n", errors.WithMessagef(err, "ignoring %s", path))
+			//fmt.Printf("%s\n", errors.WithMessagef(err, "ignoring %s", path))
 			return struct{}{}, false
 		}
 		b := img.Bounds()
@@ -279,7 +283,7 @@ func (m *Matcher) Match(ctx context.Context, path string) (struct{}, bool) {
 			m.count++
 			matchedImgInfo, ok := match.(*imgInfo)
 			if !ok {
-				fmt.Printf("unexpected type %T\n", match)
+				//fmt.Printf("unexpected type %T\n", match)
 				return struct{}{}, false
 			}
 
