@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"flag"
@@ -14,8 +14,10 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Nr90/imgsim"
@@ -24,13 +26,14 @@ import (
 	"github.com/rivo/duplo"
 	"github.com/vbauerster/mpb/v5"
 	"github.com/vbauerster/mpb/v5/decor"
+	"go.atomizer.io/stream"
 )
 
 var (
 	extensions  = map[string]func(io.Reader) (image.Image, error){"jpg": jpeg.Decode, "jpeg": jpeg.Decode, "png": png.Decode, "gif": gif.Decode}
 	algo        = flag.String("algo", "avg", "algorithm for image hashing fmiq|avg|diff")
 	sensitivity = flag.Int("sensitivity", 0, "the sensitivity treshold (the lower, the better the match (can be negative)) - fmiq algorithm only")
-	path        = flag.String("path", ".", "the path to search the images")
+	searchPath  = flag.String("path", ".", "the path to search the images")
 	dryRun      = flag.Bool("dryrun", false, "only print found matches")
 	undo        = flag.Bool("undo", false, "restore removed duplicates")
 	recurse     = flag.Bool("r", false, "go through subdirectories as well")
@@ -103,46 +106,97 @@ func copyFileContents(src, dst string) (err error) {
 }
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	flag.Parse()
 
-	var buf bytes.Buffer
-	logger := log.New(&buf, "logger: ", log.Lshortfile)
-	dst := filepath.Join(*path, DUPLICATES)
 	*sensitivity -= 100
-	if *undo {
-		handleUndo(logger, dst)
-		return
-	}
-	files := findFilesToCompare(logger)
-	p, bar := createProgressBar(int64(len(files)))
-
 	store := createEmptyStore()
 
-	if !*dryRun {
-		_, err := os.Stat(dst)
-		if err != nil && os.IsNotExist(err) {
-			if err := os.Mkdir(dst, os.ModePerm); err != nil {
-				logger.Println("Could not create destination directory: ", err)
-				os.Exit(1)
-			}
-		}
+	matcher := &Matcher{
+		store: store,
 	}
 
-	for _, filename := range files {
-		err := handleFile(store, filename, logger, dst)
-		if err != nil {
-			logger.Print(err)
-		}
-		bar.Increment()
+	s := stream.Scaler[string, struct{}]{
+		Wait: time.Millisecond,
+		Life: time.Second / 2,
+		Fn:   matcher.Match,
 	}
-	p.Wait()
-	fmt.Print("Report:\n", &buf)
+
+	out, err := s.Exec(ctx, filenames(ctx, *searchPath))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	tick := time.NewTicker(time.Second)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-out:
+			if !ok {
+				return
+			}
+		case <-tick.C:
+			log.Printf("total duplicates: %d", matcher.count)
+		}
+	}
+}
+
+func filenames(ctx context.Context, dir string) <-chan string {
+	out := make(chan string)
+
+	go func() {
+		defer close(out)
+
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		wg := sync.WaitGroup{}
+		for _, file := range files {
+			if !file.IsDir() {
+				i, err := file.Info()
+				if err != nil {
+					continue
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				case out <- path.Join(dir, i.Name()):
+				}
+
+				continue
+			}
+
+			i, err := file.Info()
+			if err != nil {
+				return
+			}
+
+			wg.Add(1)
+			go func(d os.FileInfo) {
+				defer wg.Done()
+
+				stream.Pipe(ctx, filenames(ctx, path.Join(dir, d.Name())), out)
+			}(i)
+		}
+
+		wg.Wait()
+	}()
+
+	return out
 }
 
 func findFilesToCompare(logger *log.Logger) []string {
 	var files []string
 	total := int64(0)
-	err := filepath.Walk(*path, func(currentPath string, info os.FileInfo, err error) error {
+	err := filepath.Walk(*searchPath, func(currentPath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -152,7 +206,7 @@ func findFilesToCompare(logger *log.Logger) []string {
 			logger.Printf("Found file: %v", info.Name())
 			files = append(files, currentPath)
 		}
-		if info.IsDir() && !*recurse && currentPath != *path {
+		if info.IsDir() && !*recurse && currentPath != *searchPath {
 			return filepath.SkipDir
 		}
 		return nil
@@ -175,6 +229,70 @@ func createEmptyStore() hasher.Store {
 		store = hasher.NewImgsimStore()
 	}
 	return store
+}
+
+type Matcher struct {
+	store   hasher.Store
+	storeMu sync.Mutex
+	count   int
+}
+
+func (m *Matcher) Match(ctx context.Context, path string) (struct{}, bool) {
+	ext := filepath.Ext(path)
+	if len(ext) == 0 {
+		return struct{}{}, false
+	}
+
+	if _, ok := extensions[ext[1:]]; !ok {
+		return struct{}{}, false
+	}
+
+	format, err := getImageFormat(path)
+	if err != nil {
+		return struct{}{}, false
+	}
+
+	if decodeFunc, ok := extensions[format]; ok {
+		fmt.Printf("decoding %s\n", path)
+		file, err := os.Open(path)
+		if err != nil {
+			fmt.Printf("%s\n", errors.WithMessagef(err, "%s", path))
+			return struct{}{}, false
+		}
+		defer checkClose(file, &err)
+
+		img, err := decodeFunc(file)
+		if err != nil {
+			fmt.Printf("%s\n", errors.WithMessagef(err, "ignoring %s", path))
+			return struct{}{}, false
+		}
+		b := img.Bounds()
+		res := b.Dx() * b.Dy()
+
+		hash := createImageHash(img)
+
+		m.storeMu.Lock()
+		defer m.storeMu.Unlock()
+
+		match := m.store.Query(hash)
+		if match != nil {
+			m.count++
+			matchedImgInfo, ok := match.(*imgInfo)
+			if !ok {
+				fmt.Printf("unexpected type %T\n", match)
+				return struct{}{}, false
+			}
+
+			matchedFile := matchedImgInfo.fileInfo
+			fmt.Printf("%s matches: %s\n", path, matchedFile)
+		}
+
+		m.store.Add(&imgInfo{fileInfo: path, res: res}, hash)
+
+		return struct{}{}, true
+	}
+
+	return struct{}{}, false
 }
 
 func handleFile(store hasher.Store, currentFile string, logger *log.Logger, dst string) (err error) {
@@ -211,38 +329,9 @@ func handleFile(store hasher.Store, currentFile string, logger *log.Logger, dst 
 			matchedImgInfo := match.(*imgInfo)
 			matchedFile := matchedImgInfo.fileInfo
 			logger.Printf("%s matches: %s\n", currentFile, matchedFile)
-
-			if !*dryRun {
-				sum, err := createFileHash(currentFile, matchedFile)
-				if err != nil {
-					return err
-				}
-				baseMatchedFile := filepath.Base(matchedFile)
-				baseCurrentFile := filepath.Base(currentFile)
-				if res > matchedImgInfo.res {
-					store.Add(&imgInfo{fileInfo: currentFile, res: res}, hash)
-					store.Delete(matchedFile, hash)
-					if err := os.Rename(matchedFile, filepath.Join(dst, fmt.Sprintf("%s_%s_%s", sum, deletePrefix, baseMatchedFile))); err != nil {
-						return errors.WithMessagef(err, "error moving file: %s_%s_%s", sum, deletePrefix, baseMatchedFile)
-					}
-					if err := CopyFile(currentFile, filepath.Join(dst, fmt.Sprintf("%s_%s_%s", sum, keepPrefix, baseCurrentFile))); err != nil {
-						return errors.WithMessagef(err, "error copying file: %s_%s_%s", sum, keepPrefix, baseCurrentFile)
-					}
-				} else {
-					if err := CopyFile(matchedFile, filepath.Join(dst, fmt.Sprintf("%s_%s_%s", sum, keepPrefix, baseMatchedFile))); err != nil {
-						return errors.WithMessagef(err, "error copying file: %s_%s_%s", sum, keepPrefix, baseMatchedFile)
-					}
-					if err := os.Rename(currentFile, filepath.Join(dst, fmt.Sprintf("%s_%s_%s", sum, deletePrefix, baseCurrentFile))); err != nil {
-						return errors.WithMessagef(err, "error moving file: %s_%s_%s", sum, deletePrefix, baseCurrentFile)
-					}
-				}
-			} else {
-				store.Add(&imgInfo{fileInfo: currentFile, res: res}, hash)
-			}
-
-		} else {
-			store.Add(&imgInfo{fileInfo: currentFile, res: res}, hash)
 		}
+
+		store.Add(&imgInfo{fileInfo: currentFile, res: res}, hash)
 	}
 	return err
 }
@@ -345,9 +434,9 @@ func handleUndo(logger *log.Logger, dst string) {
 		}
 		if strings.Contains(f.Name(), deletePrefix) {
 			if *dryRun {
-				logger.Printf("moving %s to %s\n ", filepath.Join(dst, f.Name()), filepath.Join(*path, f.Name()[13:]))
+				logger.Printf("moving %s to %s\n ", filepath.Join(dst, f.Name()), filepath.Join(*searchPath, f.Name()[13:]))
 			} else {
-				err := os.Rename(filepath.Join(dst, f.Name()), filepath.Join(*path, f.Name()[13:]))
+				err := os.Rename(filepath.Join(dst, f.Name()), filepath.Join(*searchPath, f.Name()[13:]))
 				if err != nil {
 					logger.Fatalf("Failed to rename file %q: %v", f.Name(), err)
 				}

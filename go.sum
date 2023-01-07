@@ -14,5 +14,9 @@ github.com/rivo/duplo v0.0.0-20180323201418-c4ec823d58cd h1:if+/aco/wZitSP1n2F2S
 github.com/rivo/duplo v0.0.0-20180323201418-c4ec823d58cd/go.mod h1:gw8DEItjXFxacZzluOv7azm5G22Vvx/OBZb7Wqoqp9M=
 github.com/vbauerster/mpb/v5 v5.3.0 h1:vgrEJjUzHaSZKDRRxul5Oh4C72Yy/5VEMb0em+9M0mQ=
 github.com/vbauerster/mpb/v5 v5.3.0/go.mod h1:4yTkvAb8Cm4eylAp6t0JRq6pXDkFJ4krUlDqWYkakAs=
+go.atomizer.io/stream v1.0.7 h1:ioEU8tmj6hif3Ha1d0DiFZ+IDeV1ZceIOqXybRrvi4I=
+go.atomizer.io/stream v1.0.7/go.mod h1:dZMYp2fUFjWlQke91O/kJb+FslZy8thQZzUl9vVMr84=
+go.structs.dev/gen v1.0.1 h1:tp81qXTWF61tgmyCVqBBdQcEMp9Ftlo5/ekkm+wVkYk=
+go.structs.dev/gen v1.0.1/go.mod h1:Y1KXGuqAQdeL0G485oZzpgVwVZ4x+/7/ViNdQJuINo4=
 golang.org/x/sys v0.0.0-20200810151505-1b9f1253b3ed h1:WBkVNH1zd9jg/dK4HCM4lNANnmd12EHC9z+LmcCG4ns=
 golang.org/x/sys v0.0.0-20200810151505-1b9f1253b3ed/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
