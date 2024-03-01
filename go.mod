@@ -16,5 +16,5 @@ require (
 	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	go.structs.dev/gen v1.0.1 // indirect
-	golang.org/x/sys v0.0.0-20200810151505-1b9f1253b3ed // indirect
+	golang.org/x/sys v0.1.0 // indirect
 )
